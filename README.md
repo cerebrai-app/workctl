@@ -12,8 +12,9 @@ cargo run -- init
 ### `init`
 
 Downloads a [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
-distribution to `${XDG_DATA_HOME:-~/.local/share}/python-build-standalone/<version>+<build options>/`
-(for example `3.14.10+freethreaded+pgo+lto`). It does nothing if that directory already exists.
+distribution to `<data dir>/python-build-standalone/<version>+<build options>/`
+(for example `3.14.10+freethreaded+pgo+lto`). The data dir is `$XDG_DATA_HOME` if set to an absolute path, otherwise `%LOCALAPPDATA%` on Windows
+and `~/.local/share` elsewhere. It does nothing if the install directory already exists.
 
 Defaults to the newest Python 3.14 `freethreaded+pgo+lto` build. If that build isn't published for
 your platform (e.g. Windows has no LTO builds) it falls back to the next best build and says so.
