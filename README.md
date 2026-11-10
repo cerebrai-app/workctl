@@ -68,7 +68,9 @@ and `~/.local/share` elsewhere. It does nothing if the install directory already
 `init` looks up the latest release on every run, so it needs network access even when everything is
 already installed. A newer Python patch version in a newer release installs into a new directory next
 to the old one. Older directories are never removed (each is a few hundred MB): delete the ones you no
-longer need by hand. `--python-version` takes a Python version (`3`, `3.14` or `3.14.15`), never a
+longer need by hand.
+A later release that rebuilds the *same* Python version is not picked up: `init` finds the existing
+directory and does nothing, so delete it if you want the newer build. `--python-version` takes a Python version (`3`, `3.14` or `3.14.15`), never a
 python-build-standalone release date.
 
 Defaults to the newest Python 3.14 `freethreaded+pgo+lto` build. If that build isn't published for
