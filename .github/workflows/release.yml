@@ -26,6 +26,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # full history, to tell whether a tag is on the default branch
+
+      # The tag check only guards the version number. Also require the tagged
+      # commit to be on the default branch, so a tag pushed on a feature branch
+      # cannot publish unreviewed code. (A tag protection rule for v* in the
+      # repository settings is the other half of this.)
+      - name: Tagged commit must be on the default branch
+        if: github.ref_type == 'tag'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on $DEFAULT_BRANCH"
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
