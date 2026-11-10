@@ -735,6 +735,70 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
     }
 
     #[test]
+    fn unpack_refuses_entries_that_escape_the_install_dir() {
+        let dir = std::env::temp_dir().join(format!("pbs-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let outside = dir.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_bytes);
+            // 1. A path that climbs out with `..`. The Builder refuses to write
+            //    such a name, so put it into the header bytes by hand.
+            let mut h = tar::Header::new_gnu();
+            h.set_size(4);
+            h.set_mode(0o644);
+            let name = b"../evil.txt";
+            h.as_old_mut().name[..name.len()].copy_from_slice(name);
+            h.set_cksum();
+            b.append(&h, &b"evil"[..]).unwrap();
+            // 2. A symlink out of the tree, then a file written through it.
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_path("link").unwrap();
+            h.set_link_name(&outside).unwrap();
+            h.set_cksum();
+            b.append(&h, std::io::empty()).unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_size(4);
+            h.set_mode(0o644);
+            h.set_path("link/pwned.txt").unwrap();
+            h.set_cksum();
+            b.append(&h, &b"evil"[..]).unwrap();
+            b.finish().unwrap();
+        }
+        // The archive really holds the hostile entries (otherwise this test
+        // would pass without testing anything).
+        let names: Vec<Vec<u8>> = tar::Archive::new(&tar_bytes[..])
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path_bytes().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                b"../evil.txt".to_vec(),
+                b"link".to_vec(),
+                b"link/pwned.txt".to_vec()
+            ]
+        );
+        let archive = dir.join("evil.tar.zst");
+        fs::write(&archive, zstd::encode_all(&tar_bytes[..], 0).unwrap()).unwrap();
+
+        // The result (an error, or a skipped entry) does not matter. What matters
+        // is that nothing was written outside the unpack directory.
+        let partial = dir.join("work").join("x.partial");
+        fs::create_dir_all(dir.join("work")).unwrap();
+        let _ = unpack_and_publish(&archive, &partial, &dir.join("work").join("dest"));
+        assert!(!dir.join("work").join("evil.txt").exists(), "`..` escaped");
+        assert!(!dir.join("evil.txt").exists(), "`..` escaped");
+        assert!(!outside.join("pwned.txt").exists(), "symlink escaped");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn python_version_accepts_versions_and_rejects_release_dates() {
         for ok in ["3", "3.14", "3.14.15", "3.9", "3.9.1", "10.0"] {
             assert!(validate_python_version(ok).is_ok(), "{ok}");
