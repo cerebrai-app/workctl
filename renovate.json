@@ -5,11 +5,12 @@
   "enabledManagers": ["github-actions", "custom.regex"],
   "customManagers": [
     {
-      "description": "Pinned plugin marketplace checkouts: a `# renovate:` comment above `ref: <sha> # <tag>`",
+      "description": "Pinned versions annotated with a `# renovate:` comment: marketplace checkouts (`ref: <sha> # <tag>`) and the Renovate image (`renovate-version: <version>@<digest>`)",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*ref: (?<currentDigest>[a-f0-9]{40}) # (?<currentValue>\\S+)"
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*ref: (?<currentDigest>[a-f0-9]{40}) # (?<currentValue>\\S+)",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n\\s*renovate-version: (?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
       ]
     }
   ]
