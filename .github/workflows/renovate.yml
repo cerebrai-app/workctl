@@ -3,11 +3,17 @@ name: Renovate
 # Self-hosted Renovate. It opens PRs that bump the pinned GitHub Actions and the
 # pinned ponytail plugin marketplace (see renovate.json).
 #
-# Needs a repository secret RENOVATE_TOKEN: a fine-grained personal access token
-# (or GitHub App token) for this repository with read/write on Contents, Pull
-# requests and Workflows, and read on Metadata. The built-in GITHUB_TOKEN cannot
-# be granted the `workflows` permission, so it cannot update files under
-# .github/workflows. Until the secret exists the job only prints a warning.
+# Runs weekly, and can be started by hand from the Actions tab ("Run workflow",
+# with an optional dry run that opens no PRs).
+#
+# Authenticates as a GitHub App rather than with a personal access token. Needs
+# two secrets (repository or organization level):
+#   RENOVATE_APP_CLIENT_ID    the app's Client ID (on its settings page, "Iv...")
+#   RENOVATE_APP_PRIVATE_KEY  the app's private key (the whole .pem file)
+# The app must be installed on this repository with read/write on Contents,
+# Issues, Pull requests and Workflows (the built-in GITHUB_TOKEN cannot get the
+# `workflows` permission, so it cannot update files under .github/workflows).
+# Until the secrets exist the job only prints a warning.
 
 on:
   schedule:
@@ -30,17 +36,30 @@ jobs:
   renovate:
     runs-on: ubuntu-latest
     env:
-      RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+      APP_CLIENT_ID: ${{ secrets.RENOVATE_APP_CLIENT_ID }}
     steps:
-      - name: Warn when RENOVATE_TOKEN is missing
-        if: ${{ env.RENOVATE_TOKEN == '' }}
-        run: echo "::warning::Secret RENOVATE_TOKEN is not set, so Renovate was skipped. See the comment at the top of .github/workflows/renovate.yml."
+      - name: Warn when the app credentials are missing
+        if: ${{ env.APP_CLIENT_ID == '' }}
+        run: echo "::warning::Secret RENOVATE_APP_CLIENT_ID is not set, so Renovate was skipped. See the comment at the top of .github/workflows/renovate.yml."
+
+      - name: Create app token
+        id: app-token
+        if: ${{ env.APP_CLIENT_ID != '' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+          # Only what Renovate needs, even if the app is granted more.
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
 
       - name: Run Renovate
-        if: ${{ env.RENOVATE_TOKEN != '' }}
+        if: ${{ steps.app-token.outputs.token != '' }}
         uses: renovatebot/github-action@266fef21329c44765ad42f9dea1f01f5d2d91084 # v46.3.13
         with:
-          token: ${{ env.RENOVATE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
         env:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           RENOVATE_ONBOARDING: "false"
