@@ -2,6 +2,26 @@
 
 Command line interface (Rust).
 
+## Install locally
+
+Requires a [Rust toolchain](https://rustup.rs) (stable).
+
+```sh
+git clone https://github.com/cerebrai-app/workctl
+cd workctl
+cargo install --path . --locked
+```
+
+This builds a release binary and installs it to `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on
+Windows), which rustup normally puts on your `PATH`. Check it with:
+
+```sh
+workctl version
+```
+
+To upgrade, `git pull` and re-run the `cargo install` command (it replaces the old binary).
+To remove it, run `cargo uninstall workctl`.
+
 ## Usage
 
 ```sh
