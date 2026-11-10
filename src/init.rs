@@ -19,15 +19,16 @@ const RELEASE_DOWNLOAD_URL: &str =
 pub const DEFAULT_PYTHON_VERSION: &str = "3.14";
 pub const DEFAULT_VARIANT: &str = "freethreaded+pgo+lto";
 
-/// Tried in order when no `--variant` is given and the default is unavailable
-/// for this platform (e.g. Windows has no LTO builds).
+/// Tried in order, after `DEFAULT_VARIANT`, when no `--variant` is given and
+/// the default is unavailable for this platform (e.g. Windows has no LTO
+/// builds). Compiler optimizations are preferred over free-threading.
 const FALLBACK_VARIANTS: &[&str] = &[
-    "freethreaded+pgo",
-    "freethreaded+lto",
-    "freethreaded+noopt",
     "pgo+lto",
+    "freethreaded+pgo",
     "pgo",
+    "freethreaded+lto",
     "lto",
+    "freethreaded+noopt",
     "noopt",
 ];
 
@@ -78,10 +79,7 @@ pub fn run(opts: &Options) -> Result<()> {
 
     let variants: Vec<String> = match &opts.variant {
         Some(v) => vec![v.clone()],
-        None => std::iter::once(DEFAULT_VARIANT)
-            .chain(FALLBACK_VARIANTS.iter().copied())
-            .map(String::from)
-            .collect(),
+        None => default_variants(),
     };
     let Some(asset) = select(&assets, &opts.python_version, &variants) else {
         bail!(
@@ -115,6 +113,14 @@ pub fn run(opts: &Options) -> Result<()> {
     result?;
     println!("installed: {}", dest.display());
     Ok(())
+}
+
+/// The default build followed by the fallbacks, in preference order.
+fn default_variants() -> Vec<String> {
+    std::iter::once(DEFAULT_VARIANT)
+        .chain(FALLBACK_VARIANTS.iter().copied())
+        .map(String::from)
+        .collect()
 }
 
 fn install(
@@ -406,6 +412,41 @@ ggg  cpython-3.13.9+20261026-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst
 
     // Paths come from temp_dir() so they are absolute on every platform
     // (a bare "/x/data" has no drive letter on Windows).
+    #[test]
+    fn default_chain_prefers_optimizations_over_freethreaded() {
+        assert_eq!(
+            default_variants(),
+            variants(&[
+                "freethreaded+pgo+lto",
+                "pgo+lto",
+                "freethreaded+pgo",
+                "pgo",
+                "freethreaded+lto",
+                "lto",
+                "freethreaded+noopt",
+                "noopt",
+            ])
+        );
+        // Windows-like: no LTO and a free-threaded PGO build exists. The
+        // non-free-threaded pgo+lto would win if present; here only
+        // freethreaded+pgo and pgo exist, so freethreaded+pgo is chosen.
+        let sums = "\
+a  cpython-3.14.10+1-x86_64-pc-windows-msvc-freethreaded+pgo-full.tar.zst
+b  cpython-3.14.10+1-x86_64-pc-windows-msvc-pgo-full.tar.zst
+c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
+";
+        let assets = parse_sums(sums, "x86_64-pc-windows-msvc");
+        let a = select(&assets, "3.14", &default_variants()).unwrap();
+        assert_eq!(a.build_options, "freethreaded+pgo");
+        // Without it, plain pgo beats freethreaded+noopt/noopt.
+        let assets = parse_sums(
+            &sums.replace("freethreaded+pgo", "x"),
+            "x86_64-pc-windows-msvc",
+        );
+        let a = select(&assets, "3.14", &default_variants()).unwrap();
+        assert_eq!(a.build_options, "pgo");
+    }
+
     #[test]
     fn data_home_prefers_absolute_xdg_everywhere() {
         let xdg = std::env::temp_dir().join("xdg-data");
