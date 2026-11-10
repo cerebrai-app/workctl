@@ -1,0 +1,391 @@
+//! `init`: download a python-build-standalone distribution into the user's
+//! XDG data directory.
+//!
+//! Layout: `${XDG_DATA_HOME}/python-build-standalone/<version>+<build options>/`
+//! (e.g. `3.14.10+freethreaded+pgo+lto`), containing the archive's own
+//! `python/` tree. If that directory already exists nothing is downloaded.
+
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::ffi::OsString;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+const LATEST_RELEASE_URL: &str = "https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release/latest-release.json";
+const RELEASE_DOWNLOAD_URL: &str =
+    "https://github.com/astral-sh/python-build-standalone/releases/download";
+
+pub const DEFAULT_PYTHON_VERSION: &str = "3.14";
+pub const DEFAULT_VARIANT: &str = "freethreaded+pgo+lto";
+
+/// Tried in order when no `--variant` is given and the default is unavailable
+/// for this platform (e.g. Windows has no LTO builds).
+const FALLBACK_VARIANTS: &[&str] = &[
+    "freethreaded+pgo",
+    "freethreaded+lto",
+    "freethreaded+noopt",
+    "pgo+lto",
+    "pgo",
+    "lto",
+    "noopt",
+];
+
+pub struct Options {
+    /// Version prefix, e.g. `3.14` (newest 3.14.x) or `3.14.10` (exact).
+    pub python_version: String,
+    /// Exact build options, e.g. `freethreaded+pgo+lto`. `None` means the
+    /// default with fallbacks.
+    pub variant: Option<String>,
+    /// Release tag, e.g. `20261026`. `None` means the latest release.
+    pub release: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asset {
+    pub file_name: String,
+    pub sha256: String,
+    pub version: Vec<u32>,
+    pub build_options: String,
+}
+
+impl Asset {
+    fn dir_name(&self) -> String {
+        let v: Vec<String> = self.version.iter().map(u32::to_string).collect();
+        format!("{}+{}", v.join("."), self.build_options)
+    }
+}
+
+pub fn run(opts: &Options) -> Result<()> {
+    let root = data_home_from(
+        std::env::var_os("XDG_DATA_HOME"),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+    )?
+    .join("python-build-standalone");
+    let triple = host_triple()?;
+    let agent = agent();
+
+    let tag = match &opts.release {
+        Some(t) => t.clone(),
+        None => latest_tag(&agent)?,
+    };
+    let sums_url = format!("{RELEASE_DOWNLOAD_URL}/{tag}/SHA256SUMS");
+    let sums = http_text(&agent, &sums_url)?;
+    let assets = parse_sums(&sums, triple);
+
+    let variants: Vec<String> = match &opts.variant {
+        Some(v) => vec![v.clone()],
+        None => std::iter::once(DEFAULT_VARIANT)
+            .chain(FALLBACK_VARIANTS.iter().copied())
+            .map(String::from)
+            .collect(),
+    };
+    let Some(asset) = select(&assets, &opts.python_version, &variants) else {
+        bail!(
+            "no python-build-standalone {tag} distribution for Python {} ({}) on {triple}.\n\
+             available build options for that version: {}",
+            opts.python_version,
+            variants.join(", "),
+            available(&assets, &opts.python_version)
+        );
+    };
+    if opts.variant.is_none() && asset.build_options != DEFAULT_VARIANT {
+        eprintln!(
+            "note: {DEFAULT_VARIANT} is not available for {triple}; using {}",
+            asset.build_options
+        );
+    }
+
+    let dest = root.join(asset.dir_name());
+    if dest.exists() {
+        println!("already installed: {}", dest.display());
+        return Ok(());
+    }
+
+    fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    let archive = root.join(format!("{}.download", asset.file_name));
+    let partial = root.join(format!("{}.partial", asset.dir_name()));
+    let result = install(&agent, &tag, asset, &archive, &partial, &dest);
+    // Best-effort cleanup of temporaries, whether or not we succeeded.
+    let _ = fs::remove_file(&archive);
+    let _ = fs::remove_dir_all(&partial);
+    result?;
+    println!("installed: {}", dest.display());
+    Ok(())
+}
+
+fn install(
+    agent: &ureq::Agent,
+    tag: &str,
+    asset: &Asset,
+    archive: &Path,
+    partial: &Path,
+    dest: &Path,
+) -> Result<()> {
+    let _ = fs::remove_dir_all(partial);
+    // '+' must be percent-encoded in the URL path.
+    let url = format!(
+        "{RELEASE_DOWNLOAD_URL}/{tag}/{}",
+        asset.file_name.replace('+', "%2B")
+    );
+    eprintln!("downloading {}", asset.file_name);
+    download(agent, &url, archive, &asset.sha256)?;
+
+    eprintln!("extracting to {}", dest.display());
+    let file = File::open(archive)?;
+    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let mut tar = tar::Archive::new(decoder);
+    tar.set_preserve_permissions(true);
+    tar.unpack(partial).context("extracting archive")?;
+    fs::rename(partial, dest).with_context(|| format!("moving into {}", dest.display()))?;
+    Ok(())
+}
+
+fn download(agent: &ureq::Agent, url: &str, out: &Path, expected_sha256: &str) -> Result<()> {
+    let mut resp = agent
+        .get(url)
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    let total = resp.body().content_length();
+    let mut reader = resp.body_mut().as_reader();
+    let mut file = File::create(out)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let (mut done, mut last_pct) = (0u64, 0u64);
+    loop {
+        let n = reader.read(&mut buf).context("reading download")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n])?;
+        done += n as u64;
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let pct = done * 100 / total / 10 * 10;
+            if pct > last_pct {
+                eprintln!("  {pct}%");
+                last_pct = pct;
+            }
+        }
+    }
+    file.flush()?;
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        bail!("checksum mismatch for {url}: expected {expected_sha256}, got {actual}");
+    }
+    Ok(())
+}
+
+fn agent() -> ureq::Agent {
+    // Use the OS trust store so corporate/proxy CAs work, and pick up
+    // HTTPS_PROXY from the environment (ureq's default).
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
+    ureq::Agent::config_builder().tls_config(tls).build().into()
+}
+
+fn http_text(agent: &ureq::Agent, url: &str) -> Result<String> {
+    agent
+        .get(url)
+        .call()
+        .with_context(|| format!("GET {url}"))?
+        .body_mut()
+        .read_to_string()
+        .with_context(|| format!("reading {url}"))
+}
+
+fn latest_tag(agent: &ureq::Agent) -> Result<String> {
+    let body = http_text(agent, LATEST_RELEASE_URL)?;
+    let json: serde_json::Value =
+        serde_json::from_str(&body).context("parsing latest-release.json")?;
+    json.get("tag")
+        .and_then(|t| t.as_str())
+        .map(String::from)
+        .context("latest-release.json has no \"tag\"")
+}
+
+fn host_triple() -> Result<&'static str> {
+    let t = if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "musl"
+    )) {
+        "x86_64-unknown-linux-musl"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        target_env = "gnu"
+    )) {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "aarch64",
+        target_env = "musl"
+    )) {
+        "aarch64-unknown-linux-musl"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "aarch64-pc-windows-msvc"
+    } else {
+        bail!("unsupported platform for python-build-standalone");
+    };
+    Ok(t)
+}
+
+/// `$XDG_DATA_HOME` if set to an absolute path (per the XDG spec), otherwise
+/// `$HOME/.local/share`.
+fn data_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
+    if let Some(p) = xdg.filter(|p| Path::new(p).is_absolute()) {
+        return Ok(p.into());
+    }
+    let home = home.context("neither XDG_DATA_HOME nor HOME is set")?;
+    Ok(PathBuf::from(home).join(".local").join("share"))
+}
+
+/// Parse a release `SHA256SUMS` file, keeping `full` archives for `triple`
+/// with a plain numeric CPython version (pre-releases are skipped).
+fn parse_sums(sums: &str, triple: &str) -> Vec<Asset> {
+    sums.lines().filter_map(|l| parse_line(l, triple)).collect()
+}
+
+fn parse_line(line: &str, triple: &str) -> Option<Asset> {
+    let (hash, name) = line.trim().split_once(char::is_whitespace)?;
+    let name = name.trim().trim_start_matches('*');
+    // cpython-<version>+<tag>-<triple>-<build options>-full.tar.zst
+    let rest = name.strip_prefix("cpython-")?;
+    let (version, rest) = rest.split_once('+')?;
+    let (_tag, rest) = rest.split_once('-')?;
+    let rest = rest.strip_prefix(triple)?.strip_prefix('-')?;
+    let build_options = rest.strip_suffix("-full.tar.zst")?;
+    let version = version
+        .split('.')
+        .map(|p| p.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(Asset {
+        file_name: name.to_string(),
+        sha256: hash.to_string(),
+        version,
+        build_options: build_options.to_string(),
+    })
+}
+
+fn version_matches(version: &[u32], want: &str) -> bool {
+    match want
+        .split('.')
+        .map(|p| p.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()
+    {
+        Some(w) => !w.is_empty() && version.starts_with(&w),
+        None => false,
+    }
+}
+
+/// First variant (in preference order) with any matching asset wins; within
+/// it, the highest version.
+fn select<'a>(assets: &'a [Asset], want: &str, variants: &[String]) -> Option<&'a Asset> {
+    variants.iter().find_map(|v| {
+        assets
+            .iter()
+            .filter(|a| &a.build_options == v && version_matches(&a.version, want))
+            .max_by(|a, b| a.version.cmp(&b.version))
+    })
+}
+
+fn available(assets: &[Asset], want: &str) -> String {
+    let mut v: Vec<&str> = assets
+        .iter()
+        .filter(|a| version_matches(&a.version, want))
+        .map(|a| a.build_options.as_str())
+        .collect();
+    v.sort();
+    v.dedup();
+    if v.is_empty() {
+        "none (is the Python version right?)".into()
+    } else {
+        v.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LNX: &str = "x86_64-unknown-linux-gnu";
+    const SUMS: &str = "\
+aaa  cpython-3.14.9+20261001-x86_64-unknown-linux-gnu-freethreaded+pgo+lto-full.tar.zst
+bbb  cpython-3.14.10+20261026-x86_64-unknown-linux-gnu-freethreaded+pgo+lto-full.tar.zst
+ccc  cpython-3.14.10+20261026-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst
+ddd  cpython-3.14.10+20261026-x86_64-unknown-linux-gnu-freethreaded-install_only.tar.gz
+eee  cpython-3.15.0a1+20261026-x86_64-unknown-linux-gnu-freethreaded+pgo+lto-full.tar.zst
+fff  cpython-3.14.10+20261026-aarch64-unknown-linux-gnu-freethreaded+pgo+lto-full.tar.zst
+ggg  cpython-3.13.9+20261026-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst
+";
+
+    fn variants(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_only_full_archives_for_triple() {
+        let assets = parse_sums(SUMS, LNX);
+        // install_only, aarch64 and the 3.15.0a1 pre-release are skipped.
+        assert_eq!(assets.len(), 4);
+        assert_eq!(assets[1].version, vec![3, 14, 10]);
+        assert_eq!(assets[1].build_options, "freethreaded+pgo+lto");
+        assert_eq!(assets[1].sha256, "bbb");
+    }
+
+    #[test]
+    fn picks_newest_patch_for_version_prefix() {
+        let assets = parse_sums(SUMS, LNX);
+        let a = select(&assets, "3.14", &variants(&[DEFAULT_VARIANT])).unwrap();
+        assert_eq!(a.version, vec![3, 14, 10]);
+        assert_eq!(a.dir_name(), "3.14.10+freethreaded+pgo+lto");
+    }
+
+    #[test]
+    fn exact_version_and_no_partial_component_match() {
+        let assets = parse_sums(SUMS, LNX);
+        let a = select(&assets, "3.14.9", &variants(&[DEFAULT_VARIANT])).unwrap();
+        assert_eq!(a.sha256, "aaa");
+        // "3.1" must not match 3.14.x.
+        assert!(select(&assets, "3.1", &variants(&[DEFAULT_VARIANT])).is_none());
+    }
+
+    #[test]
+    fn falls_back_in_preference_order() {
+        let assets = parse_sums(SUMS, LNX);
+        // 3.13 has no free-threaded build in the sample, so pgo+lto is used.
+        let v = variants(&[DEFAULT_VARIANT, "freethreaded+pgo", "pgo+lto"]);
+        let a = select(&assets, "3.13", &v).unwrap();
+        assert_eq!(a.build_options, "pgo+lto");
+        assert!(select(&assets, "3.13", &variants(&[DEFAULT_VARIANT])).is_none());
+    }
+
+    #[test]
+    fn data_home_prefers_absolute_xdg() {
+        let p = data_home_from(Some("/x/data".into()), Some("/home/u".into())).unwrap();
+        assert_eq!(p, PathBuf::from("/x/data"));
+        let p = data_home_from(Some("relative".into()), Some("/home/u".into())).unwrap();
+        assert_eq!(p, PathBuf::from("/home/u/.local/share"));
+        let p = data_home_from(None, Some("/home/u".into())).unwrap();
+        assert_eq!(p, PathBuf::from("/home/u/.local/share"));
+        assert!(data_home_from(None, None).is_err());
+    }
+}
