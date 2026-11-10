@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 const LATEST_RELEASE_URL: &str = "https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release/latest-release.json";
 const RELEASE_DOWNLOAD_URL: &str =
@@ -104,15 +105,53 @@ pub fn run(opts: &Options) -> Result<()> {
     }
 
     fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
-    let archive = root.join(format!("{}.download", asset.file_name));
-    let partial = root.join(format!("{}.partial", asset.dir_name()));
+    sweep_stale_temps(&root, STALE_TEMP_AGE);
+    // Temp names include the process id so concurrent runs of the same build
+    // don't delete each other's files.
+    let pid = std::process::id();
+    let archive = root.join(format!("{}.{pid}.download", asset.dir_name()));
+    let partial = root.join(format!("{}.{pid}.partial", asset.dir_name()));
     let result = install(&agent, &tag, asset, &archive, &partial, &dest);
     // Best-effort cleanup of temporaries, whether or not we succeeded.
     let _ = fs::remove_file(&archive);
     let _ = fs::remove_dir_all(&partial);
-    result?;
-    println!("installed: {}", dest.display());
+    if result? {
+        println!("installed: {}", dest.display());
+    }
     Ok(())
+}
+
+/// Leftover temp files older than this are removed at the start of a run.
+const STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Remove `*.download` / `*.partial` entries in `root` not modified for
+/// `max_age`: leftovers from a run that was killed (e.g. Ctrl-C). Recent ones
+/// may belong to a run in progress, so they are left alone. Best effort.
+fn sweep_stale_temps(root: &Path, max_age: Duration) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.ends_with(".download") || name.ends_with(".partial")) {
+            continue;
+        }
+        let age = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok());
+        if age.is_some_and(|a| a >= max_age) {
+            let path = entry.path();
+            let _ = if path.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+        }
+    }
 }
 
 /// The default build followed by the fallbacks, in preference order.
@@ -123,6 +162,8 @@ fn default_variants() -> Vec<String> {
         .collect()
 }
 
+/// Download, verify and unpack into `dest`. Returns `false` if another process
+/// finished the same install first.
 fn install(
     agent: &ureq::Agent,
     tag: &str,
@@ -130,7 +171,7 @@ fn install(
     archive: &Path,
     partial: &Path,
     dest: &Path,
-) -> Result<()> {
+) -> Result<bool> {
     let _ = fs::remove_dir_all(partial);
     // '+' must be percent-encoded in the URL path.
     let url = format!(
@@ -146,8 +187,15 @@ fn install(
     let mut tar = tar::Archive::new(decoder);
     tar.set_preserve_permissions(true);
     tar.unpack(partial).context("extracting archive")?;
-    fs::rename(partial, dest).with_context(|| format!("moving into {}", dest.display()))?;
-    Ok(())
+    if let Err(err) = fs::rename(partial, dest) {
+        // Another process may have finished the same install first.
+        if dest.exists() {
+            println!("already installed by another process: {}", dest.display());
+            return Ok(false);
+        }
+        return Err(err).with_context(|| format!("moving into {}", dest.display()));
+    }
+    Ok(true)
 }
 
 fn download(agent: &ureq::Agent, url: &str, out: &Path, expected_sha256: &str) -> Result<()> {
@@ -156,8 +204,21 @@ fn download(agent: &ureq::Agent, url: &str, out: &Path, expected_sha256: &str) -
         .call()
         .with_context(|| format!("GET {url}"))?;
     let total = resp.body().content_length();
-    let mut reader = resp.body_mut().as_reader();
+    let reader = resp.body_mut().as_reader();
     let mut file = File::create(out)?;
+    copy_verified(reader, &mut file, total, expected_sha256)
+        .with_context(|| format!("downloading {url}"))
+}
+
+/// Copy `reader` to `writer`, then check the SHA-256 of what was copied
+/// against `expected` (hex, case-insensitive). This is the only integrity
+/// check on the downloaded archive. `total`, if known, drives progress output.
+fn copy_verified(
+    mut reader: impl Read,
+    mut writer: impl Write,
+    total: Option<u64>,
+    expected: &str,
+) -> Result<()> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 256 * 1024];
     let (mut done, mut last_pct) = (0u64, 0u64);
@@ -167,7 +228,7 @@ fn download(agent: &ureq::Agent, url: &str, out: &Path, expected_sha256: &str) -
             break;
         }
         hasher.update(&buf[..n]);
-        file.write_all(&buf[..n])?;
+        writer.write_all(&buf[..n])?;
         done += n as u64;
         if let Some(total) = total.filter(|t| *t > 0) {
             let pct = done * 100 / total / 10 * 10;
@@ -177,14 +238,14 @@ fn download(agent: &ureq::Agent, url: &str, out: &Path, expected_sha256: &str) -
             }
         }
     }
-    file.flush()?;
+    writer.flush()?;
     let actual: String = hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    if !actual.eq_ignore_ascii_case(expected_sha256) {
-        bail!("checksum mismatch for {url}: expected {expected_sha256}, got {actual}");
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("checksum mismatch: expected {expected}, got {actual}");
     }
     Ok(())
 }
@@ -195,7 +256,14 @@ fn agent() -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
         .root_certs(ureq::tls::RootCerts::PlatformVerifier)
         .build();
-    ureq::Agent::config_builder().tls_config(tls).build().into()
+    // No total timeout: the archive is large. `timeout_per_read` restarts on
+    // every read, so it only fires when the connection stalls.
+    ureq::Agent::config_builder()
+        .tls_config(tls)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_per_read(Some(Duration::from_secs(60)))
+        .build()
+        .into()
 }
 
 fn http_text(agent: &ureq::Agent, url: &str) -> Result<String> {
@@ -295,6 +363,10 @@ fn parse_sums(sums: &str, triple: &str) -> Vec<Asset> {
 fn parse_line(line: &str, triple: &str) -> Option<Asset> {
     let (hash, name) = line.trim().split_once(char::is_whitespace)?;
     let name = name.trim().trim_start_matches('*');
+    // Names come from a remote file and end up in paths and URLs.
+    if name.contains(['/', '\\']) {
+        return None;
+    }
     // cpython-<version>+<tag>-<triple>-<build options>-full.tar.zst
     let rest = name.strip_prefix("cpython-")?;
     let (version, rest) = rest.split_once('+')?;
@@ -455,6 +527,69 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
             let p = data_home_from(os(&xdg), os(&other), os(&other), os(&other), windows).unwrap();
             assert_eq!(p, xdg);
         }
+    }
+
+    // sha256("hello")
+    const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    #[test]
+    fn copy_verified_accepts_matching_hash() {
+        let mut out = Vec::new();
+        copy_verified(&b"hello"[..], &mut out, Some(5), HELLO_SHA256).unwrap();
+        assert_eq!(out, b"hello");
+        // Hex case does not matter.
+        copy_verified(
+            &b"hello"[..],
+            Vec::new(),
+            None,
+            &HELLO_SHA256.to_uppercase(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn copy_verified_rejects_wrong_hash_and_tampered_data() {
+        let wrong = "0".repeat(64);
+        let err = copy_verified(&b"hello"[..], Vec::new(), None, &wrong).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        let err = copy_verified(&b"hellO"[..], Vec::new(), None, HELLO_SHA256).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        // Empty input must not slip through either.
+        assert!(copy_verified(&b""[..], Vec::new(), None, HELLO_SHA256).is_err());
+    }
+
+    #[test]
+    fn rejects_asset_names_with_path_separators() {
+        let ok = "aaa  cpython-3.14.10+1-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst";
+        assert!(parse_line(ok, LNX).is_some());
+        for bad in [
+            "aaa  cpython-3.14.10+../../x-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst",
+            "aaa  cpython-3.14.10+1-x86_64-unknown-linux-gnu-a/b-full.tar.zst",
+            "aaa  cpython-3.14.10+1-x86_64-unknown-linux-gnu-a\\b-full.tar.zst",
+        ] {
+            assert!(parse_line(bad, LNX).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn sweep_removes_only_old_temp_entries() {
+        let root = std::env::temp_dir().join(format!("pbs-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("3.14.1+x.99.partial")).unwrap();
+        fs::write(root.join("3.14.1+x.99.download"), b"x").unwrap();
+        fs::create_dir_all(root.join("3.14.1+installed")).unwrap();
+
+        // Nothing is older than a day yet.
+        sweep_stale_temps(&root, STALE_TEMP_AGE);
+        assert!(root.join("3.14.1+x.99.partial").exists());
+        assert!(root.join("3.14.1+x.99.download").exists());
+
+        // With a zero max age, temp entries go but real installs stay.
+        sweep_stale_temps(&root, Duration::ZERO);
+        assert!(!root.join("3.14.1+x.99.partial").exists());
+        assert!(!root.join("3.14.1+x.99.download").exists());
+        assert!(root.join("3.14.1+installed").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

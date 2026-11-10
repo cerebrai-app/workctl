@@ -65,6 +65,10 @@ distribution to `<data dir>/python-build-standalone/<version>+<build options>/`
 (for example `3.14.10+freethreaded+pgo+lto`). The data dir is `$XDG_DATA_HOME` if set to an absolute path, otherwise `%LOCALAPPDATA%` on Windows
 and `~/.local/share` elsewhere. It does nothing if the install directory already exists.
 
+`init` looks up the latest release on every run, so it needs network access even when everything is
+already installed. A newer Python patch version in a newer release installs into a new directory next
+to the old one; pass `--release <tag>` to stay on a specific release.
+
 Defaults to the newest Python 3.14 `freethreaded+pgo+lto` build. If that build isn't published for
 your platform (e.g. Windows has no LTO builds) it falls back to the next best build and says so.
 Downloads are verified against the release's `SHA256SUMS`.
