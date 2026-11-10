@@ -105,6 +105,14 @@ jobs:
           [[ "${{ matrix.target }}" == *windows* ]] && exe="$BIN.exe"
           mkdir -p "stage/$name" dist
           cp "target/${{ matrix.target }}/release/$exe" README.md LICENSE "stage/$name/"
+          # Run the binary that is about to be published: it must start and report
+          # its own version. The arm64 Linux build is cross-compiled and cannot
+          # run on this x86_64 runner, so it is skipped.
+          if [[ "${{ matrix.cross }}" != "true" ]]; then
+            out=$("stage/$name/$exe" version)
+            echo "$out"
+            [[ "$out" == "$BIN ${{ steps.version.outputs.version }}" ]]
+          fi
           cd stage
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             file="$name.zip"

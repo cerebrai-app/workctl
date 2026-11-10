@@ -479,7 +479,7 @@ fn available(assets: &[Asset], want: &str) -> String {
     v.sort();
     v.dedup();
     if v.is_empty() {
-        "none (is the Python version right?)".into()
+        "none (is the Python version right? pre-releases such as 3.15.0a1 are not offered)".into()
     } else {
         v.join(", ")
     }
