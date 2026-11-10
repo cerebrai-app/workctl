@@ -71,7 +71,9 @@ to the old one; pass `--release <tag>` to stay on a specific release.
 
 Defaults to the newest Python 3.14 `freethreaded+pgo+lto` build. If that build isn't published for
 your platform (e.g. Windows has no LTO builds) it falls back to the next best build and says so.
-Downloads are verified against the release's `SHA256SUMS`.
+Downloads are checked against the release's `SHA256SUMS`, which catches corrupt or truncated downloads.
+The checksums come from the same GitHub release as the archive, so this does not protect against a
+compromised release.
 
 ```sh
 workctl init                              # python 3.14, freethreaded+pgo+lto

@@ -71,7 +71,7 @@ pub fn run(opts: &Options) -> Result<()> {
     let agent = agent();
 
     let tag = match &opts.release {
-        Some(t) => t.clone(),
+        Some(t) => validate_tag(t)?.to_string(),
         None => latest_tag(&agent)?,
     };
     let sums_url = format!("{RELEASE_DOWNLOAD_URL}/{tag}/SHA256SUMS");
@@ -182,6 +182,13 @@ fn install(
     download(agent, &url, archive, &asset.sha256)?;
 
     eprintln!("extracting to {}", dest.display());
+    unpack_and_publish(archive, partial, dest)
+}
+
+/// Unpack the `.tar.zst` `archive` into `partial`, then rename it to `dest`.
+/// Returns `false` if `dest` appeared in the meantime (another process won the
+/// race), leaving `partial` for the caller to clean up.
+fn unpack_and_publish(archive: &Path, partial: &Path, dest: &Path) -> Result<bool> {
     let file = File::open(archive)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut tar = tar::Archive::new(decoder);
@@ -286,6 +293,20 @@ fn latest_tag(agent: &ureq::Agent) -> Result<String> {
         .context("latest-release.json has no \"tag\"")
 }
 
+/// Release tags are dates like `20261026`; allow only characters that are safe
+/// to put in a URL path, and nothing that could climb out of it.
+fn validate_tag(tag: &str) -> Result<&str> {
+    let ok = !tag.is_empty()
+        && !tag.starts_with('.')
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !ok {
+        bail!("invalid release tag {tag:?}: use letters, digits, '.', '-' and '_' only");
+    }
+    Ok(tag)
+}
+
 fn host_triple() -> Result<&'static str> {
     let t = if cfg!(all(
         target_os = "linux",
@@ -349,7 +370,8 @@ fn data_home_from(
         }
     }
     let home = home
-        .or(user_profile)
+        .filter(|h| !h.is_empty())
+        .or(user_profile.filter(|h| !h.is_empty()))
         .context("cannot determine the data directory: set XDG_DATA_HOME or HOME")?;
     Ok(PathBuf::from(home).join(".local").join("share"))
 }
@@ -572,6 +594,58 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
     }
 
     #[test]
+    fn unpack_and_publish_installs_once_and_reports_lost_race() {
+        let dir = std::env::temp_dir().join(format!("pbs-install-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // A tiny archive shaped like the real ones: python/PYTHON.json.
+        let mut tar_bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_bytes);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(2);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, "python/PYTHON.json", &b"hi"[..])
+                .unwrap();
+            b.finish().unwrap();
+        }
+        let archive = dir.join("a.tar.zst");
+        fs::write(&archive, zstd::encode_all(&tar_bytes[..], 0).unwrap()).unwrap();
+
+        let dest = dir.join("3.14.1+x");
+        let partial = dir.join("3.14.1+x.1.partial");
+        assert!(unpack_and_publish(&archive, &partial, &dest).unwrap());
+        assert_eq!(fs::read(dest.join("python/PYTHON.json")).unwrap(), b"hi");
+        assert!(!partial.exists(), "partial dir is renamed away");
+
+        // Second run: dest now exists, so this one lost the race.
+        let partial2 = dir.join("3.14.1+x.2.partial");
+        assert!(!unpack_and_publish(&archive, &partial2, &dest).unwrap());
+        assert_eq!(fs::read(dest.join("python/PYTHON.json")).unwrap(), b"hi");
+
+        // A corrupt archive is an error and installs nothing.
+        let bad = dir.join("bad.tar.zst");
+        fs::write(&bad, b"not a zstd file").unwrap();
+        let dest2 = dir.join("3.14.2+x");
+        assert!(unpack_and_publish(&bad, &dir.join("3.14.2+x.3.partial"), &dest2).is_err());
+        assert!(!dest2.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn release_tag_validation() {
+        assert_eq!(validate_tag("20261026").unwrap(), "20261026");
+        assert!(validate_tag("v1.2-rc_1").is_ok());
+        for bad in [
+            "", "..", ".hidden", "../x", "a/b", "a\\b", "a b", "a?b", "a#b",
+        ] {
+            assert!(validate_tag(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn sweep_removes_only_old_temp_entries() {
         let root = std::env::temp_dir().join(format!("pbs-sweep-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -602,6 +676,10 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
         let p = data_home_from(None, os(&home), None, None, false).unwrap();
         assert_eq!(p, expected);
         assert!(data_home_from(None, None, None, None, false).is_err());
+        // An empty HOME must not turn into a relative ".local/share".
+        assert!(data_home_from(None, Some("".into()), None, None, false).is_err());
+        let p = data_home_from(None, Some("".into()), None, os(&home), false).unwrap();
+        assert_eq!(p, expected);
     }
 
     #[test]
