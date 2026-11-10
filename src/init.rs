@@ -284,13 +284,19 @@ fn http_text(agent: &ureq::Agent, url: &str) -> Result<String> {
 }
 
 fn latest_tag(agent: &ureq::Agent) -> Result<String> {
-    let body = http_text(agent, LATEST_RELEASE_URL)?;
+    tag_from_latest_release(&http_text(agent, LATEST_RELEASE_URL)?)
+}
+
+/// The release tag in `latest-release.json`. It ends up in a URL, so it gets
+/// the same check as `--release`.
+fn tag_from_latest_release(body: &str) -> Result<String> {
     let json: serde_json::Value =
-        serde_json::from_str(&body).context("parsing latest-release.json")?;
-    json.get("tag")
+        serde_json::from_str(body).context("parsing latest-release.json")?;
+    let tag = json
+        .get("tag")
         .and_then(|t| t.as_str())
-        .map(String::from)
-        .context("latest-release.json has no \"tag\"")
+        .context("latest-release.json has no \"tag\"")?;
+    Ok(validate_tag(tag)?.to_string())
 }
 
 /// Release tags are dates like `20261026`; allow only characters that are safe
@@ -395,10 +401,7 @@ fn parse_line(line: &str, triple: &str) -> Option<Asset> {
     let (_tag, rest) = rest.split_once('-')?;
     let rest = rest.strip_prefix(triple)?.strip_prefix('-')?;
     let build_options = rest.strip_suffix("-full.tar.zst")?;
-    let version = version
-        .split('.')
-        .map(|p| p.parse::<u32>().ok())
-        .collect::<Option<Vec<_>>>()?;
+    let version = parse_version(version)?;
     Some(Asset {
         file_name: name.to_string(),
         sha256: hash.to_string(),
@@ -407,15 +410,13 @@ fn parse_line(line: &str, triple: &str) -> Option<Asset> {
     })
 }
 
+/// `"3.14.10"` -> `[3, 14, 10]`; `None` if any part is not a plain number.
+fn parse_version(s: &str) -> Option<Vec<u32>> {
+    s.split('.').map(|p| p.parse::<u32>().ok()).collect()
+}
+
 fn version_matches(version: &[u32], want: &str) -> bool {
-    match want
-        .split('.')
-        .map(|p| p.parse::<u32>().ok())
-        .collect::<Option<Vec<_>>>()
-    {
-        Some(w) => !w.is_empty() && version.starts_with(&w),
-        None => false,
-    }
+    parse_version(want).is_some_and(|w| version.starts_with(&w))
 }
 
 /// First variant (in preference order) with any matching asset wins; within
@@ -632,6 +633,34 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
         assert!(unpack_and_publish(&bad, &dir.join("3.14.2+x.3.partial"), &dest2).is_err());
         assert!(!dest2.exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn latest_release_tag_is_validated_like_release_flag() {
+        assert_eq!(
+            tag_from_latest_release(r#"{"version":1,"tag":"20261026"}"#).unwrap(),
+            "20261026"
+        );
+        for bad in [
+            r#"{"tag":"../x"}"#,
+            r#"{"tag":"a/b"}"#,
+            r#"{"tag":""}"#,
+            r#"{"tag":42}"#,
+            r#"{"version":1}"#,
+            "not json",
+        ] {
+            assert!(tag_from_latest_release(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parse_version_accepts_only_plain_numbers() {
+        assert_eq!(parse_version("3.14.10"), Some(vec![3, 14, 10]));
+        assert_eq!(parse_version("3"), Some(vec![3]));
+        for bad in ["", "3.", ".3", "3.x", "3.15.0a1", "v3.14"] {
+            assert_eq!(parse_version(bad), None, "{bad:?}");
+        }
+        assert!(!version_matches(&[3, 14, 10], ""));
     }
 
     #[test]
