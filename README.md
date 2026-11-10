@@ -81,7 +81,9 @@ A later release that rebuilds the *same* Python version is not picked up: `init`
 directory and does nothing, so delete it if you want the newer build.
 
 `--python-version` takes a Python version (`3`, `3.14` or `3.14.15`), never a python-build-standalone
-release date.
+release date. The preferred build comes first, then the newest matching version that has it: if a
+newer Python exists only as another build (say 3.15 without a free-threaded build), `init` prints a
+note and installs the older one with the preferred build. Pass `--variant` to require a specific build.
 
 Defaults to the newest Python 3.14 `freethreaded+pgo+lto` build. If that build isn't published for
 your platform (e.g. Windows has no LTO builds) it falls back to the next best build and says so.

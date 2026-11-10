@@ -23,7 +23,9 @@ enum Command {
 
 #[derive(Args)]
 struct InitArgs {
-    /// Python version to install: "3" (newest 3.x), "3.14" (newest 3.14.x) or exact like "3.14.15"
+    /// Python version to install: "3", "3.14" or exact like "3.14.15". Picks the newest
+    /// version that has the preferred build; a note is printed if a newer one exists
+    /// only as another build
     #[arg(long, default_value = init::DEFAULT_PYTHON_VERSION)]
     python_version: String,
 

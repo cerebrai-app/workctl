@@ -95,6 +95,9 @@ pub fn run(opts: &Options) -> Result<()> {
             asset.build_options
         );
     }
+    if let Some(note) = newer_version_note(&assets, &opts.python_version, asset) {
+        eprintln!("{note}");
+    }
 
     let dest = root.join(asset.dir_name());
     if dest.exists() {
@@ -104,11 +107,12 @@ pub fn run(opts: &Options) -> Result<()> {
 
     fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
     sweep_stale_temps(&root, STALE_TEMP_AGE);
-    // Temp names include the process id so concurrent runs of the same build
-    // don't delete each other's files.
-    let pid = std::process::id();
-    let archive = root.join(format!("{}.{pid}.download", asset.dir_name()));
-    let partial = root.join(format!("{}.{pid}.partial", asset.dir_name()));
+    // Temp names include the process id and the start time, so concurrent runs
+    // of the same build don't delete each other's files even when two
+    // containers sharing one data directory happen to have the same pid.
+    let unique = unique_suffix();
+    let archive = root.join(format!("{}.{unique}.download", asset.dir_name()));
+    let partial = root.join(format!("{}.{unique}.partial", asset.dir_name()));
     let result = install(&agent, &tag, asset, &archive, &partial, &dest);
     // Best-effort cleanup of temporaries, whether or not we succeeded.
     let _ = fs::remove_file(&archive);
@@ -459,6 +463,42 @@ fn version_matches(version: &[u32], want: &str) -> bool {
     parse_version(want).is_some_and(|w| version.starts_with(&w))
 }
 
+/// `<pid>-<nanoseconds since the epoch>`.
+fn unique_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{}-{nanos}", std::process::id())
+}
+
+/// The preferred build wins over a newer version (`select` below). When that
+/// means skipping a newer matching version that only exists as another build,
+/// say so, so `--python-version 3` never quietly gives an older Python.
+fn newer_version_note(assets: &[Asset], want: &str, chosen: &Asset) -> Option<String> {
+    let newest = assets
+        .iter()
+        .filter(|a| version_matches(&a.version, want))
+        .map(|a| &a.version)
+        .max()?;
+    if *newest <= chosen.version {
+        return None;
+    }
+    let mut builds: Vec<&str> = assets
+        .iter()
+        .filter(|a| &a.version == newest)
+        .map(|a| a.build_options.as_str())
+        .collect();
+    builds.sort();
+    let newest: Vec<String> = newest.iter().map(u32::to_string).collect();
+    Some(format!(
+        "note: Python {} exists only as {}; using {} with {}",
+        newest.join("."),
+        builds.join(", "),
+        chosen.dir_name().split('+').next().unwrap_or_default(),
+        chosen.build_options
+    ))
+}
+
 /// First variant (in preference order) with any matching asset wins; within
 /// it, the highest version.
 fn select<'a>(assets: &'a [Asset], want: &str, variants: &[String]) -> Option<&'a Asset> {
@@ -796,6 +836,54 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
         assert!(!dir.join("evil.txt").exists(), "`..` escaped");
         assert!(!outside.join("pwned.txt").exists(), "symlink escaped");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn preferred_build_beats_a_newer_version_and_says_so() {
+        let sums = "\
+a  cpython-3.15.1+1-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst
+b  cpython-3.15.1+1-x86_64-unknown-linux-gnu-pgo-full.tar.zst
+c  cpython-3.14.10+1-x86_64-unknown-linux-gnu-freethreaded+pgo+lto-full.tar.zst
+d  cpython-3.14.10+1-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst
+";
+        let assets = parse_sums(sums, LNX);
+
+        // "3": 3.15.1 has no free-threaded build, 3.14.10 does, so the preferred
+        // build wins and the user is told about the newer version.
+        let a = select(&assets, "3", &default_variants()).unwrap();
+        assert_eq!(
+            (a.version.clone(), a.build_options.as_str()),
+            (vec![3, 14, 10], "freethreaded+pgo+lto")
+        );
+        let note = newer_version_note(&assets, "3", a).unwrap();
+        assert!(
+            note.contains("3.15.1") && note.contains("pgo, pgo+lto"),
+            "{note}"
+        );
+        assert!(
+            note.contains("3.14.10") && note.contains("freethreaded+pgo+lto"),
+            "{note}"
+        );
+
+        // "3.14": the newest 3.14.x already has the preferred build: no note.
+        let a = select(&assets, "3.14", &default_variants()).unwrap();
+        assert_eq!(a.version, vec![3, 14, 10]);
+        assert_eq!(newer_version_note(&assets, "3.14", a), None);
+
+        // "3.15": only the fallback builds exist, and the newest is chosen: no note.
+        let a = select(&assets, "3.15", &default_variants()).unwrap();
+        assert_eq!(
+            (a.version.clone(), a.build_options.as_str()),
+            (vec![3, 15, 1], "pgo+lto")
+        );
+        assert_eq!(newer_version_note(&assets, "3.15", a), None);
+    }
+
+    #[test]
+    fn unique_suffix_differs_between_calls() {
+        let (a, b) = (unique_suffix(), unique_suffix());
+        assert!(a.starts_with(&format!("{}-", std::process::id())), "{a}");
+        assert_ne!(a, b);
     }
 
     #[test]
