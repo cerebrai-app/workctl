@@ -29,22 +29,35 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 1
 
+      # The action only accepts marketplace URLs ending in .git, which can't carry
+      # a ref, so the ponytail marketplace is checked out at a pinned commit and
+      # passed as a local path instead. Renovate keeps `ref` up to date.
+      - name: Checkout ponytail plugin marketplace
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: DietrichGebert/ponytail
+          # renovate: datasource=github-tags depName=DietrichGebert/ponytail
+          ref: 7801d061243d7b753bad0e0b3c057cd250b11755 # v5.3.3
+          path: .marketplaces/ponytail
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Run ponytail review
         id: ponytail-review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/DietrichGebert/ponytail.git'
+          plugin_marketplaces: ${{ github.workspace }}/.marketplaces/ponytail
           plugins: 'ponytail@ponytail'
           prompt: |
             /ponytail:ponytail-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
 
             When the review is done, post the full report as a single comment on the pull request with `gh pr comment`.
-          claude_args: '--allowedTools "Bash(gh pr comment:*)"'
+          claude_args: '--allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
 
   claude-review:
     runs-on: ubuntu-latest
@@ -56,15 +69,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1.0.270
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Not pinned: the action only takes URLs ending in .git (no ref), and Claude Code
+          # rejects a local copy of the reserved `claude-code-plugins` marketplace name.
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
