@@ -23,7 +23,7 @@ enum Command {
 
 #[derive(Args)]
 struct InitArgs {
-    /// Python version to install: a prefix like "3.14" (newest patch) or exact like "3.14.10"
+    /// Python version to install: "3" (newest 3.x), "3.14" (newest 3.14.x) or exact like "3.14.15"
     #[arg(long, default_value = init::DEFAULT_PYTHON_VERSION)]
     python_version: String,
 
@@ -31,10 +31,6 @@ struct InitArgs {
     /// Default: freethreaded+pgo+lto, falling back to the best available build
     #[arg(long)]
     variant: Option<String>,
-
-    /// python-build-standalone release tag, e.g. "20261026" (default: latest)
-    #[arg(long)]
-    release: Option<String>,
 }
 
 fn version_string() -> String {
@@ -51,7 +47,6 @@ fn main() {
         Command::Init(args) => init::run(&init::Options {
             python_version: args.python_version,
             variant: args.variant,
-            release: args.release,
         }),
     };
     if let Err(err) = result {

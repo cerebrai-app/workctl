@@ -67,7 +67,8 @@ and `~/.local/share` elsewhere. It does nothing if the install directory already
 
 `init` looks up the latest release on every run, so it needs network access even when everything is
 already installed. A newer Python patch version in a newer release installs into a new directory next
-to the old one; pass `--release <tag>` to stay on a specific release.
+to the old one. `--python-version` takes a Python version (`3`, `3.14` or `3.14.15`), never a
+python-build-standalone release date.
 
 Defaults to the newest Python 3.14 `freethreaded+pgo+lto` build. If that build isn't published for
 your platform (e.g. Windows has no LTO builds) it falls back to the next best build and says so.
@@ -77,9 +78,9 @@ compromised release.
 
 ```sh
 workctl init                              # python 3.14, freethreaded+pgo+lto
+workctl init --python-version 3           # newest Python 3.x
 workctl init --python-version 3.13.9      # exact version
 workctl init --variant pgo+lto            # exact build options, no fallback
-workctl init --release 20261026           # pin a python-build-standalone release
 ```
 
 ## Development

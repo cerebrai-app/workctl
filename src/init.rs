@@ -34,13 +34,12 @@ const FALLBACK_VARIANTS: &[&str] = &[
 ];
 
 pub struct Options {
-    /// Version prefix, e.g. `3.14` (newest 3.14.x) or `3.14.10` (exact).
+    /// A Python version: `3` (newest 3.x), `3.14` (newest 3.14.x) or `3.14.15`
+    /// (exact). Not a python-build-standalone release date.
     pub python_version: String,
     /// Exact build options, e.g. `freethreaded+pgo+lto`. `None` means the
     /// default with fallbacks.
     pub variant: Option<String>,
-    /// Release tag, e.g. `20261026`. `None` means the latest release.
-    pub release: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +58,8 @@ impl Asset {
 }
 
 pub fn run(opts: &Options) -> Result<()> {
+    // Checked first, so a bad value fails before anything touches the network.
+    validate_python_version(&opts.python_version)?;
     let root = data_home_from(
         std::env::var_os("XDG_DATA_HOME"),
         std::env::var_os("HOME"),
@@ -70,10 +71,7 @@ pub fn run(opts: &Options) -> Result<()> {
     let triple = host_triple()?;
     let agent = agent();
 
-    let tag = match &opts.release {
-        Some(t) => validate_tag(t)?.to_string(),
-        None => latest_tag(&agent)?,
-    };
+    let tag = latest_tag(&agent)?;
     let sums_url = format!("{RELEASE_DOWNLOAD_URL}/{tag}/SHA256SUMS");
     let sums = http_text(&agent, &sums_url)?;
     let assets = parse_sums(&sums, triple);
@@ -121,8 +119,31 @@ pub fn run(opts: &Options) -> Result<()> {
     Ok(())
 }
 
+/// Renaming the unpacked tree into place is retried this many times, this long
+/// apart, while the destination still does not exist.
+const RENAME_ATTEMPTS: u32 = 5;
+const RENAME_DELAY: Duration = Duration::from_millis(200);
+
 /// Leftover temp files older than this are removed at the start of a run.
 const STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `fs::rename`, retried while `to` still does not exist. On Windows a virus
+/// scanner often holds files in a freshly unpacked tree, which makes the rename
+/// fail with "Access is denied" for a moment. If `to` has appeared (another
+/// process won the race) the error is returned at once for the caller to handle.
+fn rename_retrying(from: &Path, to: &Path, attempts: u32, delay: Duration) -> std::io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(err) if to.exists() || attempt >= attempts => return Err(err),
+            Err(_) => {
+                std::thread::sleep(delay);
+                attempt += 1;
+            }
+        }
+    }
+}
 
 /// Remove `*.download` / `*.partial` entries in `root` not modified for
 /// `max_age`: leftovers from a run that was killed (e.g. Ctrl-C). Recent ones
@@ -194,7 +215,7 @@ fn unpack_and_publish(archive: &Path, partial: &Path, dest: &Path) -> Result<boo
     let mut tar = tar::Archive::new(decoder);
     tar.set_preserve_permissions(true);
     tar.unpack(partial).context("extracting archive")?;
-    if let Err(err) = fs::rename(partial, dest) {
+    if let Err(err) = rename_retrying(partial, dest, RENAME_ATTEMPTS, RENAME_DELAY) {
         // Another process may have finished the same install first.
         if dest.exists() {
             println!("already installed by another process: {}", dest.display());
@@ -299,8 +320,27 @@ fn tag_from_latest_release(body: &str) -> Result<String> {
     Ok(validate_tag(tag)?.to_string())
 }
 
-/// Release tags are dates like `20261026`; allow only characters that are safe
-/// to put in a URL path, and nothing that could climb out of it.
+/// Accepts `3`, `3.14` or `3.14.15`: up to three numbers of one to three digits.
+/// That keeps a python-build-standalone release date such as `20261111` (which
+/// would otherwise parse as a huge major version) from being taken as one.
+fn validate_python_version(v: &str) -> Result<()> {
+    let parts: Vec<&str> = v.split('.').collect();
+    let ok = parts.len() <= 3
+        && parts
+            .iter()
+            .all(|p| (1..=3).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()));
+    if !ok {
+        bail!(
+            "invalid Python version {v:?}: use 3, 3.14 or 3.14.15 \
+             (this is a Python version, not a python-build-standalone release)"
+        );
+    }
+    Ok(())
+}
+
+/// The release tag from `latest-release.json` is a date like `20261026`; allow
+/// only characters that are safe to put in a URL path, and nothing that could
+/// climb out of it.
 fn validate_tag(tag: &str) -> Result<&str> {
     let ok = !tag.is_empty()
         && !tag.starts_with('.')
@@ -636,7 +676,7 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
     }
 
     #[test]
-    fn latest_release_tag_is_validated_like_release_flag() {
+    fn latest_release_tag_is_validated() {
         assert_eq!(
             tag_from_latest_release(r#"{"version":1,"tag":"20261026"}"#).unwrap(),
             "20261026"
@@ -661,6 +701,62 @@ c  cpython-3.14.10+1-x86_64-pc-windows-msvc-noopt-full.tar.zst
             assert_eq!(parse_version(bad), None, "{bad:?}");
         }
         assert!(!version_matches(&[3, 14, 10], ""));
+    }
+
+    #[test]
+    fn rename_retrying_moves_retries_and_gives_up() {
+        use std::time::Instant;
+        let dir = std::env::temp_dir().join(format!("pbs-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+
+        // Plain success.
+        let dest = dir.join("dest");
+        rename_retrying(&dir.join("src"), &dest, 3, Duration::ZERO).unwrap();
+        assert!(dest.is_dir() && !dir.join("src").exists());
+
+        // Destination exists (lost race): the error comes back at once, with no
+        // sleeping, so the caller can report "already installed".
+        fs::create_dir_all(dir.join("src2/sub")).unwrap();
+        fs::create_dir_all(dest.join("sub")).unwrap();
+        let start = Instant::now();
+        assert!(rename_retrying(&dir.join("src2"), &dest, 5, Duration::from_secs(5)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2), "must not retry");
+
+        // Still failing and the destination never appears: tries every attempt
+        // (two sleeps for three attempts), then returns the error.
+        let start = Instant::now();
+        let missing = dir.join("does-not-exist");
+        assert!(
+            rename_retrying(&missing, &dir.join("never"), 3, Duration::from_millis(60)).is_err()
+        );
+        assert!(start.elapsed() >= Duration::from_millis(120), "must retry");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn python_version_accepts_versions_and_rejects_release_dates() {
+        for ok in ["3", "3.14", "3.14.15", "3.9", "3.9.1", "10.0"] {
+            assert!(validate_python_version(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "20261111", // a release date, not a Python version
+            "",
+            "3.",
+            ".3",
+            "3..1",
+            "3.14.15.1",
+            "3.x",
+            "v3.14",
+            "3.14.15rc1",
+            "-1",
+            "3 ",
+            "1000",
+            "3.14.1000",
+        ] {
+            let err = validate_python_version(bad).unwrap_err().to_string();
+            assert!(err.contains("invalid Python version"), "{bad:?}: {err}");
+        }
     }
 
     #[test]
