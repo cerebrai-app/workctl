@@ -1,0 +1,163 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds binaries for each target and attaches them
+# to a GitHub Release. Pull requests that change this file only run the build
+# jobs (nothing is published), so the matrix is validated before a release.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: workctl
+
+permissions:
+  contents: read
+
+jobs:
+  # Gate: a tag on a commit whose tests fail must not build or publish anything.
+  # CI covers all three operating systems on PRs and main; this re-checks the
+  # tagged commit itself on Linux. (Cross-built targets can't run their own
+  # tests on these runners, so one job on the host is the useful check.)
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # full history, to tell whether a tag is on the default branch
+
+      # The tag check only guards the version number. Also require the tagged
+      # commit to be on the default branch, so a tag pushed on a feature branch
+      # cannot publish unreviewed code. (A tag protection rule for v* in the
+      # repository settings is the other half of this.)
+      - name: Tagged commit must be on the default branch
+        if: github.ref_type == 'tag'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on $DEFAULT_BRANCH"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --locked
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is built on the oldest hosted image, so the binaries need the
+          # oldest glibc (2.35). A newer image would raise that requirement.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04, target: aarch64-unknown-linux-gnu, cross: true }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      # No rust-cache here: a poisoned cache entry would end up in a published binary.
+
+      - name: Install aarch64 Linux cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          {
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+          } >> "$GITHUB_ENV"
+
+      - name: Determine version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          name="$BIN-v${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          exe="$BIN"
+          [[ "${{ matrix.target }}" == *windows* ]] && exe="$BIN.exe"
+          mkdir -p "stage/$name" dist
+          cp "target/${{ matrix.target }}/release/$exe" README.md LICENSE "stage/$name/"
+          # Run the binary that is about to be published: it must start and report
+          # its own version. The arm64 Linux build is cross-compiled, so it runs
+          # under QEMU user-mode emulation with the arm64 libc from the cross toolchain.
+          run_prefix=""
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            run_prefix="qemu-aarch64 -L /usr/aarch64-linux-gnu"
+          fi
+          out=$($run_prefix "stage/$name/$exe" version)
+          echo "$out"
+          [[ "$out" == "$BIN ${{ steps.version.outputs.version }}" ]]
+          cd stage
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            file="$name.zip"
+            7z a -tzip "../dist/$file" "$name"
+          else
+            file="$name.tar.gz"
+            tar czf "../dist/$file" "$name"
+          fi
+          cd ../dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$file" > "$file.sha256"
+          else
+            shasum -a 256 "$file" > "$file.sha256"
+          fi
+          ls -l
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Create release
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
