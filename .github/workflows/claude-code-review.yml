@@ -57,6 +57,7 @@ jobs:
             /ponytail:ponytail-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
 
             When the review is done, post the full report as a single comment on the pull request with `gh pr comment`.
+            Start the comment with the line `<!-- ponytail-review -->` (an HTML comment, not shown on the page), then the report.
           claude_args: '--allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
 
   claude-review:
@@ -85,3 +86,38 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+  # Collapse earlier ponytail reports as "outdated", so only the newest one stays
+  # open on the PR. A separate job on purpose: it needs write access to comments,
+  # and the job that runs the third-party plugin should not have that. It runs
+  # only after a successful review, so a failed review never hides the last report.
+  minimize-old-ponytail-reviews:
+    needs: ponytail-review
+    if: ${{ needs.ponytail-review.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Minimize all but the newest ponytail report
+        run: |
+          set -euo pipefail
+          # Ponytail reports are claude[bot] comments that start with the marker.
+          # Reports posted before the marker existed are recognised by their
+          # closing "Verdict" and "Lean:" lines.
+          select='.[] | select(.user.login == "claude[bot]")
+            | select((.body | startswith("<!-- ponytail-review -->"))
+                     or ((.body | contains("Verdict")) and (.body | contains("Lean:"))))
+            | [.created_at, .node_id, .id] | @tsv'
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --jq "$select" | sort > reports.tsv
+          echo "$(wc -l < reports.tsv) ponytail report(s) on #$PR_NUMBER"
+          # Everything except the newest (the last line after sorting by time).
+          head -n -1 reports.tsv | while IFS=$'\t' read -r created node_id id; do
+            gh api graphql \
+              -f query='mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } } }' \
+              -f id="$node_id" > /dev/null
+            echo "minimized comment $id ($created)"
+          done
