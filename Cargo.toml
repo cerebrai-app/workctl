@@ -9,9 +9,4 @@ repository = "https://github.com/cerebrai-app/workctl"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-serde_json = "1"
-sha2 = "0.10"
-tar = "0.4"
-ureq = { version = "3", features = ["platform-verifier"] }
-zstd = "0.13"
+cerebrai-python = { git = "https://github.com/cerebrai-app/cerebrai-crates", tag = "v0.1.0" }

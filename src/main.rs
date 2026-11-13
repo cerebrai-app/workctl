@@ -1,5 +1,3 @@
-mod init;
-
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
@@ -26,7 +24,7 @@ struct InitArgs {
     /// Python version to install: "3", "3.14" or exact like "3.14.15". Picks the newest
     /// version that has the preferred build; a note is printed if a newer one exists
     /// only as another build
-    #[arg(long, default_value = init::DEFAULT_PYTHON_VERSION)]
+    #[arg(long, default_value = cerebrai_python::DEFAULT_PYTHON_VERSION)]
     python_version: String,
 
     /// Exact build options to require, e.g. "pgo+lto" or "freethreaded+pgo+lto".
@@ -46,10 +44,10 @@ fn main() {
             println!("{}", version_string());
             Ok(())
         }
-        Command::Init(args) => init::run(&init::Options {
-            python_version: args.python_version,
-            variant: args.variant,
-        }),
+        Command::Init(args) => cerebrai_python::install(
+            &cerebrai_python::Options::new(args.python_version).variant(args.variant),
+        )
+        .map(drop),
     };
     if let Err(err) = result {
         eprintln!("error: {err:#}");

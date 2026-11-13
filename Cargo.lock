@@ -104,6 +104,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cerebrai-python"
+version = "0.1.0"
+source = "git+https://github.com/cerebrai-app/cerebrai-crates?tag=v0.1.0#e66bc25e60a27b14a78b67c64a2bf0a73d900294"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "sha2",
+ "tar",
+ "ureq",
+ "zstd",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -973,13 +986,8 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 name = "workctl"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "cerebrai-python",
  "clap",
- "serde_json",
- "sha2",
- "tar",
- "ureq",
- "zstd",
 ]
 
 [[package]]
