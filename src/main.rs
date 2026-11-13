@@ -44,10 +44,9 @@ fn main() {
             println!("{}", version_string());
             Ok(())
         }
-        Command::Init(args) => cerebrai_python::install(&cerebrai_python::Options {
-            python_version: args.python_version,
-            variant: args.variant,
-        })
+        Command::Init(args) => cerebrai_python::install(
+            &cerebrai_python::Options::new(args.python_version).variant(args.variant),
+        )
         .map(drop),
     };
     if let Err(err) = result {
