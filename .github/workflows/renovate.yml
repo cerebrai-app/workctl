@@ -32,7 +32,7 @@ jobs:
   renovate:
     runs-on: ubuntu-latest
     steps:
-      - uses: cerebrai-app/actions/renovate@claude/post-release-cleanup-7lfzyv
+      - uses: cerebrai-app/actions/renovate@da8c85709fb5249dc92c65ca8a5790327c3234bb # main
         with:
           app-client-id: ${{ secrets.RENOVATE_APP_CLIENT_ID }}
           app-private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}

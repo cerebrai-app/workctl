@@ -43,7 +43,7 @@ jobs:
             exit 1
           fi
 
-      - uses: cerebrai-app/actions/setup-rust@claude/post-release-cleanup-7lfzyv
+      - uses: cerebrai-app/actions/setup-rust@da8c85709fb5249dc92c65ca8a5790327c3234bb # main
       - run: cargo test --locked
 
   build:
@@ -67,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: cerebrai-app/actions/setup-rust@claude/post-release-cleanup-7lfzyv
+      - uses: cerebrai-app/actions/setup-rust@da8c85709fb5249dc92c65ca8a5790327c3234bb # main
         with:
           targets: ${{ matrix.target }}
           cross-aarch64-linux: ${{ matrix.cross && 'true' || 'false' }}
