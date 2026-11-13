@@ -13,7 +13,7 @@ name: Renovate
 
 on:
   schedule:
-    - cron: "41 4 * * 1" # Mondays
+    - cron: "41 17 * * 1" # Mondays, 12:41 EST / 13:41 EDT
   workflow_dispatch:
     inputs:
       dry_run:
