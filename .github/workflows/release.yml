@@ -16,6 +16,12 @@ env:
 permissions:
   contents: read
 
+# One run per PR (or per branch/tag for pushes). A new commit on a PR cancels
+# its previous run; runs on main and on tags are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Gate: a tag on a commit whose tests fail must not build or publish anything.
   # CI covers all three operating systems on PRs and main; this re-checks the
