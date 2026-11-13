@@ -106,7 +106,7 @@ dependencies = [
 [[package]]
 name = "cerebrai-python"
 version = "0.1.0"
-source = "git+https://github.com/cerebrai-app/cerebrai-crates?branch=claude%2Fpost-release-cleanup-7lfzyv#ea2487e34676cddc1262cd35a2a32b2a1fca0267"
+source = "git+https://github.com/cerebrai-app/cerebrai-crates?rev=e66bc25e60a27b14a78b67c64a2bf0a73d900294#e66bc25e60a27b14a78b67c64a2bf0a73d900294"
 dependencies = [
  "anyhow",
  "serde_json",

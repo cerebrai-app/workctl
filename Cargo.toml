@@ -9,5 +9,5 @@ repository = "https://github.com/cerebrai-app/workctl"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-# Pinned to the branch until cerebrai-crates tags its first release.
-cerebrai-python = { git = "https://github.com/cerebrai-app/cerebrai-crates", branch = "claude/post-release-cleanup-7lfzyv" }
+# Pinned to the cerebrai-crates merge commit; switch to `tag = "v0.1.0"` once it is tagged.
+cerebrai-python = { git = "https://github.com/cerebrai-app/cerebrai-crates", rev = "e66bc25e60a27b14a78b67c64a2bf0a73d900294" }
