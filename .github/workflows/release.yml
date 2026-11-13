@@ -16,6 +16,12 @@ env:
 permissions:
   contents: read
 
+# One run per PR (or per branch/tag for pushes). A new commit on a PR cancels
+# its previous run; runs on main and on tags are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Gate: a tag on a commit whose tests fail must not build or publish anything.
   # CI covers all three operating systems on PRs and main; this re-checks the
@@ -43,7 +49,7 @@ jobs:
             exit 1
           fi
 
-      - uses: cerebrai-app/actions/setup-rust@57b263623437524d4a872fe0b268b94e96d0b046 # main
+      - uses: cerebrai-app/actions/setup-rust@57b263623437524d4a872fe0b268b94e96d0b046 # v1.0.0
       - run: cargo test --locked
 
   build:
@@ -67,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: cerebrai-app/actions/setup-rust@57b263623437524d4a872fe0b268b94e96d0b046 # main
+      - uses: cerebrai-app/actions/setup-rust@57b263623437524d4a872fe0b268b94e96d0b046 # v1.0.0
         with:
           targets: ${{ matrix.target }}
           cross-aarch64-linux: ${{ matrix.cross && 'true' || 'false' }}
